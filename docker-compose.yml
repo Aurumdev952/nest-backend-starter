@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  reverse-proxy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    expose:
+      - 80 # http
+      - 443 # https
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy:/data
+  app:
+    # image: ghcr.io/repo/backend:latest
+    container_name: backend
+    labels:
+      - 'com.centurylinklabs.watchtower.enable=true'
+    ports:
+      - '3000:3000'
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      S3_ENDPOINT: http://minio:9000
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost:3000/health',
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: always
+    command: >
+      sh -c "
+        npx prisma migrate deploy &&
+        node dist/src/main.js
+      "
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    healthcheck:
+      test: ['CMD', 'pg_isready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ACCESS_KEY: ${S3_APP_KEY_ID}
+      MINIO_SECRET_KEY: ${S3_APP_KEY_SECRET}
+      MINIO_SERVER_URL: ${S3_PUBLIC_URL_BASE}
+    network_mode: 'host'
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+        sleep 5 &&
+        mc alias set local http://127.0.0.1:9000 ${S3_APP_KEY_ID} ${S3_APP_KEY_SECRET} &&
+        mc mb -p local/private &&
+        mc mb -p local/public &&
+        mc anonymous set download local/public &&
+        echo 'Initialized: public, private'
+      "
+    environment:
+      S3_APP_KEY_ID: ${S3_APP_KEY_ID}
+      S3_APP_KEY_SECRET: ${S3_APP_KEY_SECRET}
+  watchtower:
+    image: containrrr/watchtower
+    command:
+      - '--label-enable'
+      - '--interval'
+      - '30'
+      - '--rolling-restart'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./watchtower.config.json:/config.json
+
+volumes:
+  postgres_data:
+  minio_data:
+  caddy:
